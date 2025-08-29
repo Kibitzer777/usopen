@@ -280,7 +280,7 @@ export function USOpenDashboard() {
                   const dt = DateTime.fromISO(date).setZone('America/New_York');
                   return (
                     <option key={date} value={date}>
-                      {formatDateForDisplay(dt)} ({dt.toFormat('M/d')})
+                      {formatDateForDisplay(dt)}
                     </option>
                   );
                 })}
