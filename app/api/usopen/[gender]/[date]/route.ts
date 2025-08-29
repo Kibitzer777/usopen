@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getMatchesByDate } from '@/lib/espn';
-import { isTodayOrFuture } from '@/lib/time';
 
 export async function GET(
   request: NextRequest,

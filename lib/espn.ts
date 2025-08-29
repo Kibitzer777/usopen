@@ -4,6 +4,51 @@ import { convertUtcToEastern } from './time';
 
 type Tour = 'atp' | 'wta';
 
+// Minimal ESPN response types we actually use
+type EspnLinescore = { value?: number };
+type EspnAthlete = {
+  displayName?: string;
+  seed?: number | string;
+  country?: { code?: string };
+  flag?: { alt?: string };
+};
+type EspnTeam = { displayName?: string; seed?: number | string; locationCode?: string };
+type EspnCompetitor = {
+  athlete?: EspnAthlete;
+  team?: EspnTeam;
+  seed?: number | string;
+  displayName?: string;
+  linescores?: EspnLinescore[];
+  point?: unknown; // for live points in some endpoints
+  points?: unknown;
+  currentPoint?: unknown;
+  gamePoints?: unknown;
+  tennisPoint?: unknown;
+};
+type EspnStatus = { type?: { name?: string; description?: string; detail?: string } };
+type EspnVenue = { fullName?: string; shortName?: string };
+type EspnRound = { displayName?: string; name?: string };
+type EspnCompetition = {
+  id?: string | number;
+  startDate?: string;
+  date?: string;
+  status?: EspnStatus;
+  venue?: EspnVenue;
+  round?: EspnRound;
+  competitors?: EspnCompetitor[];
+};
+type EspnGrouping = { grouping?: { slug?: string }; competitions?: EspnCompetition[] };
+type EspnEvent = {
+  uid?: string;
+  id?: string | number;
+  name?: string;
+  shortName?: string;
+  date?: string;
+  league?: { name?: string };
+  groupings?: EspnGrouping[];
+};
+type EspnScoreboard = { events?: EspnEvent[] };
+
 export type UsOpenMatch = {
   id: string;
   tour: 'ATP' | 'WTA';
@@ -43,8 +88,8 @@ export interface NormalizedMatch {
   currentGame?: { p1Points: number; p2Points: number };
 }
 
-const cache = new LRUCache<string, any>({ max: 100, ttl: 5_000 });
-const livePointsCache = new LRUCache<string, any>({ max: 200, ttl: 15_000 });
+const cache = new LRUCache<string, EspnScoreboard>({ max: 100, ttl: 5_000 });
+const livePointsCache = new LRUCache<string, { p1: number; p2: number }>({ max: 200, ttl: 15_000 });
 
 function toYYYYMMDD(iso: string): string {
   return iso.replaceAll('-', '');
@@ -74,7 +119,7 @@ function mapStatus(espnStatus?: string): 'scheduled' | 'in_progress' | 'final' |
   }
 }
 
-async function fetchScoreboard(tour: Tour, yyyymmdd: string): Promise<any> {
+async function fetchScoreboard(tour: Tour, yyyymmdd: string): Promise<EspnScoreboard> {
   // cache-buster bucketed to 5s so repeated polls within 5s reuse the same request
   const cb = Math.floor(Date.now() / 5000);
   const url = `https://site.api.espn.com/apis/site/v2/sports/tennis/${tour}/scoreboard?dates=${yyyymmdd}&cb=${cb}`;
@@ -85,10 +130,10 @@ async function fetchScoreboard(tour: Tour, yyyymmdd: string): Promise<any> {
   try {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch(url, { cache: 'no-store' as any, signal: controller.signal, headers: { 'Accept': 'application/json' } });
+    const res = await fetch(url, { cache: 'no-store', signal: controller.signal, headers: { 'Accept': 'application/json' } });
     clearTimeout(t);
     if (!res.ok) throw new Error(`ESPN ${tour} ${yyyymmdd}: ${res.status} ${res.statusText}`);
-    const json = await res.json();
+    const json = (await res.json()) as EspnScoreboard;
     cache.set(cacheKey, json);
     return json;
   } catch (err) {
@@ -97,8 +142,8 @@ async function fetchScoreboard(tour: Tour, yyyymmdd: string): Promise<any> {
   }
 }
 
-function isUsOpenEvent(event: any): boolean {
-  const lc = (s: any) => (typeof s === 'string' ? s.toLowerCase() : '');
+function isUsOpenEvent(event: EspnEvent): boolean {
+  const lc = (s: unknown) => (typeof s === 'string' ? s.toLowerCase() : '');
   return (
     lc(event?.name).includes('us open') ||
     lc(event?.shortName).includes('us open') ||
@@ -106,7 +151,7 @@ function isUsOpenEvent(event: any): boolean {
   );
 }
 
-function extractRound(comp: any): string {
+function extractRound(comp: EspnCompetition): string {
   return (
     comp?.round?.displayName ||
     comp?.round?.name ||
@@ -116,7 +161,7 @@ function extractRound(comp: any): string {
   );
 }
 
-function extractCourt(comp: any): string {
+function extractCourt(comp: EspnCompetition): string {
   return comp?.venue?.fullName || comp?.venue?.shortName || 'Court TBD';
 }
 
@@ -133,21 +178,21 @@ function toFlagEmoji(countryCode?: string): string {
   }
 }
 
-function normalizeCompetitionToUiMatch(event: any, comp: any): NormalizedMatch | null {
+function normalizeCompetitionToUiMatch(event: EspnEvent, comp: EspnCompetition): NormalizedMatch | null {
   try {
     const statusMapped = mapStatus(comp?.status?.type?.name);
 
-    const competitors: any[] = comp?.competitors || [];
+    const competitors: EspnCompetitor[] = comp?.competitors || [];
     const p1 = competitors[0] || {};
     const p2 = competitors[1] || {};
 
-    const getSeed = (c: any): number | undefined => {
+    const getSeed = (c: EspnCompetitor): number | undefined => {
       const seed = c?.seed || c?.athlete?.seed || c?.team?.seed;
       const n = Number(seed);
       return Number.isFinite(n) ? n : undefined;
     };
 
-    const getCountry = (c: any): string | undefined => {
+    const getCountry = (c: EspnCompetitor): string | undefined => {
       return (
         c?.athlete?.flag?.alt ||
         c?.athlete?.country?.code ||
@@ -220,25 +265,26 @@ async function fetchCurrentGamePoints(eventOrCompUid: string, compId?: string): 
     candidates.push(`https://sports.core.api.espn.com/v2/sports/tennis/competitions/${compId}/details`);
   }
 
-  const asNumber = (v: any): number | null => {
+  const asNumber = (v: unknown): number | null => {
     if (v === 'AD' || v === 'Adv' || v === 'ADV' || v === 'Ad') return 50;
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
   };
 
-  const scanForPoints = (obj: any): { a?: any; b?: any } | null => {
+  const scanForPoints = (obj: unknown): { a?: unknown; b?: unknown } | null => {
     if (!obj || typeof obj !== 'object') return null;
     // Look for competitors with point/points fields
-    if (Array.isArray(obj.competitors) && obj.competitors.length >= 2) {
-      const c1 = obj.competitors[0];
-      const c2 = obj.competitors[1];
+    const maybe = obj as { competitors?: EspnCompetitor[] };
+    if (Array.isArray(maybe.competitors) && maybe.competitors.length >= 2) {
+      const c1 = maybe.competitors[0];
+      const c2 = maybe.competitors[1];
       const p1 = c1?.point ?? c1?.points ?? c1?.currentPoint ?? c1?.gamePoints ?? c1?.tennisPoint;
       const p2 = c2?.point ?? c2?.points ?? c2?.currentPoint ?? c2?.gamePoints ?? c2?.tennisPoint;
       if (p1 !== undefined || p2 !== undefined) return { a: p1, b: p2 };
     }
     // Generic deep-scan limited breadth
-    for (const k of Object.keys(obj)) {
-      const val = (obj as any)[k];
+    for (const k of Object.keys(obj as Record<string, unknown>)) {
+      const val = (obj as Record<string, unknown>)[k];
       if (val && typeof val === 'object') {
         const res = scanForPoints(val);
         if (res) return res;
@@ -251,7 +297,7 @@ async function fetchCurrentGamePoints(eventOrCompUid: string, compId?: string): 
     try {
       const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (!res.ok) continue;
-      const json = await res.json();
+      const json = (await res.json()) as unknown;
       const found = scanForPoints(json);
       if (found) {
         const p1n = asNumber(found.a);
@@ -262,7 +308,7 @@ async function fetchCurrentGamePoints(eventOrCompUid: string, compId?: string): 
           return payload;
         }
       }
-    } catch (e) {
+    } catch {
       // ignore and try next
     }
   }
@@ -275,27 +321,27 @@ export async function getMatchesByDate(gender: 'men' | 'women', dateISO: string)
   const [atpData, wtaData] = await Promise.all([
     fetchScoreboard('atp', yyyymmdd),
     fetchScoreboard('wta', yyyymmdd),
-  ]);
+  ] as const);
 
-  const allEvents: any[] = [];
+  const allEvents: EspnEvent[] = [];
   if (Array.isArray(atpData?.events)) allEvents.push(...atpData.events);
   if (Array.isArray(wtaData?.events)) allEvents.push(...wtaData.events);
 
   // Deduplicate events by uid/id
   const uniqueEvents = Array.from(
-    new Map(allEvents.map((e: any) => [String(e?.uid || e?.id), e])).values()
+    new Map(allEvents.map((e) => [String(e?.uid || e?.id), e])).values()
   );
 
   const filteredEvents = uniqueEvents.filter(isUsOpenEvent);
   const normalized: NormalizedMatch[] = [];
   const seenCompIds = new Set<string>();
   for (const ev of filteredEvents) {
-    const groupingItems: any[] = Array.isArray(ev?.groupings) ? ev.groupings : [];
+    const groupingItems: EspnGrouping[] = Array.isArray(ev?.groupings) ? ev.groupings : [];
     for (const gi of groupingItems) {
       const slug: string = (gi?.grouping?.slug || '').toLowerCase();
       if (gender === 'men' && slug !== 'mens-singles') continue;
       if (gender === 'women' && slug !== 'womens-singles') continue;
-      const comps: any[] = Array.isArray(gi?.competitions) ? gi.competitions : [];
+      const comps: EspnCompetition[] = Array.isArray(gi?.competitions) ? gi.competitions : [];
       for (const comp of comps) {
         // Filter by selected ET date
         const compStart = comp?.startDate || comp?.date || ev?.date;
@@ -315,9 +361,9 @@ export async function getMatchesByDate(gender: 'men' | 'women', dateISO: string)
     .filter((m) => m.status === 'live')
     .map(async (m) => {
       try {
-        const points = await fetchCurrentGamePoints((m as any).uid || '', (m as any).id);
+        const points = await fetchCurrentGamePoints(m.id, m.id);
         if (points) {
-          (m as any).currentGame = { p1Points: points.p1, p2Points: points.p2 };
+          m.currentGame = { p1Points: points.p1, p2Points: points.p2 };
         }
       } catch {}
       return m;

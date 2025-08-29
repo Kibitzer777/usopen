@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Header } from './Header';
+import { useState, useEffect, useCallback } from 'react';
 import { formatDateForDisplay, getCurrentEasternDate, getTournamentDates } from '@/lib/time';
 import { DateTime } from 'luxon';
 
@@ -203,9 +202,9 @@ export function USOpenDashboard() {
   };
 
   // Silent poller for today's date
-  const pollMatches = async () => {
+  const pollMatches = useCallback(async () => {
     try {
-      const response = await fetch(`/api/usopen/${selectedGender}/${selectedDate}`, { cache: 'no-store' as any });
+      const response = await fetch(`/api/usopen/${selectedGender}/${selectedDate}`, { cache: 'no-store' });
       const data = await response.json();
       if (!response.ok) return;
       setMatchData(prev => mergeLiveUpdates(prev, data));
@@ -213,7 +212,7 @@ export function USOpenDashboard() {
     } catch {
       // ignore poll errors silently
     }
-  };
+  }, [selectedGender, selectedDate]);
 
   useEffect(() => {
     // Initial load
@@ -228,7 +227,7 @@ export function USOpenDashboard() {
 
     const id = setInterval(pollMatches, 5000);
     return () => clearInterval(id);
-  }, [selectedGender, selectedDate]);
+  }, [selectedGender, selectedDate, pollMatches]);
 
   const displayDate = DateTime.fromISO(selectedDate).setZone('America/New_York');
 
@@ -255,7 +254,7 @@ export function USOpenDashboard() {
                     : 'text-gray-600 hover:text-gray-800'
                 }`}
               >
-                Men's Singles
+                Men&apos;s Singles
               </button>
               <button
                 onClick={() => setSelectedGender('women')}
@@ -265,7 +264,7 @@ export function USOpenDashboard() {
                     : 'text-gray-600 hover:text-gray-800'
                 }`}
               >
-                Women's Singles
+                Women&apos;s Singles
               </button>
             </div>
 
@@ -302,7 +301,7 @@ export function USOpenDashboard() {
         {/* Selected Date Display */}
         <div className="text-center mb-6">
           <h2 className="text-2xl font-bold text-gray-800">
-            {formatDateForDisplay(displayDate)} - {selectedGender === 'men' ? "Men's" : "Women's"} Singles
+            {formatDateForDisplay(displayDate)} - {selectedGender === 'men' ? 'Men\'s' : 'Women\'s'} Singles
           </h2>
         </div>
 
